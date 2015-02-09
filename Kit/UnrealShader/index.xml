@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<package version="801">
+	<kit name="UnrealShader" restart="YES">
+		<source target="UnrealShader/index.cfg">index.cfg</source>
+    <source target="UnrealShader/linux/UnrealShader.lx">linux/UnrealShader.lx</source>
+    <source target="UnrealShader/mac/UnrealShader.lx">mac/UnrealShader.lx</source>
+    <source target="UnrealShader/win64/UnrealShader.lx">win64/UnrealShader.lx</source>
+		<source target="UnrealShader/resources/UnrealShaderIcon.png">resources/UnrealShaderIcon.png</source>
+	</kit>
+	<message button="Help">Unreal Shader installation complete.</message>
+</package>
+
+
+
+

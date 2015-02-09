@@ -1,0 +1,424 @@
+#include <lx_shade.hpp>
+#include <lx_vector.hpp>
+#include <lx_package.hpp>
+#include <lx_action.hpp>
+#include <lx_value.hpp>
+#include <lx_log.hpp>
+#include <lx_channelui.hpp>
+#include <lx_item.hpp>
+#include <lxcommand.h>
+#include <lxidef.h>
+#include <lx_raycast.hpp>
+#include <lx_shdr.hpp>
+#include <lx_tableau.hpp>
+
+#include <math.h>
+#include <string>
+
+
+namespace Unreal_Shader {	// disambiguate everything with a namespace
+
+
+	/*
+	* Vector Packet definition: Unreal Packet
+	* Here we define the packet that will be used to carry the shading parameters through the shading pipe
+	*/
+	class UnrealPacket : public CLxImpl_VectorPacket
+	{
+	public:
+		UnrealPacket() {}
+
+		static LXtTagInfoDesc	descInfo[];
+
+		unsigned int	vpkt_Size() LXx_OVERRIDE;
+		const LXtGUID * vpkt_Interface(void) LXx_OVERRIDE;
+		LxResult	vpkt_Initialize(void	*packet) LXx_OVERRIDE;
+		LxResult	vpkt_Blend(void	*packet, void	*p0, void	*p1, float	t, int	mode) LXx_OVERRIDE;
+	};
+
+#define SRVs_UNREAL_VPACKET		"unreal.shader.packet"
+#define LXsP_SAMPLE_UNREAL		SRVs_UNREAL_VPACKET
+
+	LXtTagInfoDesc	 UnrealPacket::descInfo[] = {
+			{ LXsSRV_USERNAME, "Unreal Shader Packet" },
+			{ LXsSRV_LOGSUBSYSTEM, "vector-packet" },
+			{ LXsVPK_CATEGORY, LXsCATEGORY_SAMPLE },
+			{ 0 }
+	};
+
+	typedef struct st_LXpUnreal
+	{
+		LXtFVector	baseColor;
+	} LXpUnreal;
+
+
+	unsigned int UnrealPacket::vpkt_Size(void)
+	{
+		return	sizeof(LXpUnreal);
+	}
+
+	const LXtGUID * UnrealPacket::vpkt_Interface(void)
+	{
+		return NULL;
+	}
+
+	LxResult UnrealPacket::vpkt_Initialize(void	*p)
+	{
+		LXpUnreal		*csp = (LXpUnreal *)p;
+
+		LXx_VCLR(csp->baseColor);
+		return LXe_OK;
+	}
+
+	LxResult UnrealPacket::vpkt_Blend(void *p, void *p0, void *p1, float t, int mode)
+	{
+		return LXe_OK;
+	}
+
+
+	/*
+	* Physically based Material
+	*/
+	class UnrealMaterial : public CLxImpl_CustomMaterial, public CLxImpl_ChannelUI
+	{
+	public:
+		UnrealMaterial() {}
+
+		static LXtTagInfoDesc	descInfo[];
+
+		int				cmt_Flags() LXx_OVERRIDE;
+		LxResult		cmt_SetupChannels(ILxUnknownID addChan) LXx_OVERRIDE;
+		LxResult		cmt_LinkChannels(ILxUnknownID eval, ILxUnknownID item) LXx_OVERRIDE;
+		LxResult		cmt_LinkSampleChannels(ILxUnknownID eval, ILxUnknownID item, int *idx) LXx_OVERRIDE;
+		LxResult		cmt_ReadChannels(ILxUnknownID attr, void **ppvData) LXx_OVERRIDE;
+		LxResult		cmt_CustomPacket(const char	**) LXx_OVERRIDE;
+		void			cmt_MaterialEvaluate(ILxUnknownID etor, int *idx, ILxUnknownID vector, void *data) LXx_OVERRIDE;
+		void			cmt_ShaderEvaluate(ILxUnknownID vector, ILxUnknownID rayObj, LXpShadeComponents	*sCmp, LXpShadeOutput *sOut, void*data) LXx_OVERRIDE;
+		void			cmt_Cleanup(void *data) LXx_OVERRIDE;
+
+		LxResult		cmt_SetOpaque(int *opaque) LXx_OVERRIDE;
+
+		int			cmt_IsSampleDriven(int *idx) LXx_OVERRIDE
+		{
+			return nodalSvc.AnyDrivenChans(&idx[idxs[5].chan], 11);
+		}
+
+		LxResult		cui_UIHints(const char *channelName, ILxUnknownID hints) LXx_OVERRIDE;
+
+		LXtItemType		MyType();
+
+		CLxUser_PacketService	pkt_service;
+		CLxUser_NodalService	nodalSvc;
+
+		unsigned		ray_offset;
+		unsigned		nrm_offset;
+		unsigned		tex_offset;
+		unsigned		pix_offset;
+		unsigned		prm_offset;
+		unsigned		cst_offset;
+		unsigned		res_offset;
+		unsigned		pkt_offset;
+
+		LXtItemType		my_type;
+
+		LXtSampleIndex		idxs[4];     // indices to each data channel in RendData
+
+		class RendData
+		{
+		public:
+			bool		shaderMode;
+			LXtFVector	baseColor;
+		};
+
+	private:
+	};
+
+#define SRVs_UNREAL_MATR			"unreal"
+#define SRVs_UNREAL_MATR_ITEMTYPE	"material." SRVs_UNREAL_MATR
+
+	LXtTagInfoDesc UnrealMaterial::descInfo[] =
+	{
+			{ LXsSRV_USERNAME, "Unreal Shader" },
+			{ LXsSRV_LOGSUBSYSTEM, "comp-shader" },
+			{ 0 }
+	};
+
+	/*
+	* clean up render data
+	*/
+	void UnrealMaterial::cmt_Cleanup(void *data)
+	{
+		RendData* rd = (RendData*)data;
+		delete rd;
+	}
+
+#define UNREAL_CH_SHADERMODE	"shaderMode"
+#define UNREAL_CH_BASECOLOR		"baseColor"
+
+	int UnrealMaterial::cmt_Flags()
+	{
+		return	LXfSHADERFLAGS_USE_LOCATOR | LXfSHADERFLAGS_NEED_UVS; // means the shader is using a texture locator (which is automatocally added and linked on creation)
+	}
+
+	LxResult UnrealMaterial::cmt_SetupChannels(ILxUnknownID addChan)
+	{
+		CLxUser_AddChannel ac(addChan);
+		LXtVector zero = { 0, 0, 0 };
+
+		ac.NewChannel(UNREAL_CH_SHADERMODE, LXsTYPE_BOOLEAN);
+		ac.SetDefault(0.0, 1);
+
+		ac.NewChannel(UNREAL_CH_BASECOLOR, LXsTYPE_COLOR1);
+		ac.SetVector(LXsCHANVEC_RGB);
+		ac.SetDefaultVec(zero);
+
+		return LXe_OK;
+	}
+
+	/*
+	* Attach to channel evaluations. This gets the indicies for the channels in attributes.
+	*/
+	LxResult UnrealMaterial::cmt_LinkChannels(ILxUnknownID eval, ILxUnknownID item)
+	{
+		CLxUser_Evaluation	 ev(eval);
+		CLxUser_Item		 it(item);
+
+		idxs[0].chan = it.ChannelIndex(UNREAL_CH_SHADERMODE);
+
+		idxs[1].chan = it.ChannelIndex(UNREAL_CH_BASECOLOR".R");
+		idxs[2].chan = it.ChannelIndex(UNREAL_CH_BASECOLOR".G");
+		idxs[3].chan = it.ChannelIndex(UNREAL_CH_BASECOLOR".B");
+
+		idxs[0].layer = ev.AddChan(item, idxs[0].chan);
+
+		idxs[1].layer = ev.AddChan(item, idxs[1].chan);
+		idxs[2].layer = ev.AddChan(item, idxs[2].chan);
+		idxs[3].layer = ev.AddChan(item, idxs[3].chan);
+
+		ray_offset = pkt_service.GetOffset(LXsCATEGORY_SAMPLE, LXsP_SAMPLE_RAY);
+		nrm_offset = pkt_service.GetOffset(LXsCATEGORY_SAMPLE, LXsP_SURF_NORMAL);
+		tex_offset = pkt_service.GetOffset(LXsCATEGORY_SAMPLE, LXsP_TEXTURE_INPUT);
+		prm_offset = pkt_service.GetOffset(LXsCATEGORY_SAMPLE, LXsP_SAMPLE_PARMS);
+		cst_offset = pkt_service.GetOffset(LXsCATEGORY_SAMPLE, LXsP_RAYCAST);
+		res_offset = pkt_service.GetOffset(LXsCATEGORY_SAMPLE, LXsP_CAM_RESOLUTION);
+		pkt_offset = pkt_service.GetOffset(LXsCATEGORY_SAMPLE, LXsP_SAMPLE_UNREAL);
+		return LXe_OK;
+	}
+
+	/*
+	* Attach to channel evaluations for per-sample values. This sets the indicies
+	* for the channels in the evaluator. These are for the per-sample channels.
+	*/
+	LxResult UnrealMaterial::cmt_LinkSampleChannels(ILxUnknownID eval, ILxUnknownID item, int *idx)
+	{
+		// the index of any channel that is not driven will be set to LXiNODAL_NOT_DRIVEN
+		nodalSvc.AddSampleChan(eval, item, idxs[0].chan, idx, LXfECHAN_READ);
+
+		nodalSvc.AddSampleChan(eval, item, idxs[1].chan, idx, LXfECHAN_READ);
+		nodalSvc.AddSampleChan(eval, item, idxs[2].chan, idx, LXfECHAN_READ);
+		nodalSvc.AddSampleChan(eval, item, idxs[3].chan, idx, LXfECHAN_READ);
+
+		return LXe_OK;
+	}
+
+	/*
+	* Read channel values which may have changed.
+	*/
+	LxResult UnrealMaterial::cmt_ReadChannels(ILxUnknownID attr, void **ppvData)
+	{
+		CLxUser_Attributes at(attr);
+		RendData* rd = new RendData;
+
+		rd->shaderMode = at.Bool(idxs[0].layer);
+		rd->baseColor[0] = at.Float(idxs[1].layer);
+		rd->baseColor[1] = at.Float(idxs[2].layer);
+		rd->baseColor[2] = at.Float(idxs[3].layer);
+
+		ppvData[0] = rd;
+		return LXe_OK;
+	}
+
+	/*
+	* Like the cel shader, the halftone shader needs shading values to be computed
+	* below it, so it can't be opaque.
+	*/
+	LxResult UnrealMaterial::cmt_SetOpaque( int *opaque)
+	{
+		*opaque = 0;
+		return LXe_OK;
+	}
+
+	LxResult UnrealMaterial::cmt_CustomPacket( const char **packet)
+	{
+		packet[0] = LXsP_SAMPLE_UNREAL;
+		return LXe_OK;
+	}
+
+	/*
+	* Set custom material values at a spot
+	*/
+	void UnrealMaterial::cmt_MaterialEvaluate(ILxUnknownID etor, int *idx, ILxUnknownID vector, void *data)
+	{
+		LXpUnreal *sPacket = (LXpUnreal*)pkt_service.FastPacket(vector, pkt_offset);
+		RendData* rd = (RendData*)data;
+		LXpSampleParms		*sParms = (LXpSampleParms*)pkt_service.FastPacket(vector, prm_offset);
+
+		if (!rd->shaderMode)
+		{
+			sPacket->baseColor[0] = nodalSvc.GetFloat(etor, idx, idxs[0].chan, rd->baseColor[0]);
+			sPacket->baseColor[1] = nodalSvc.GetFloat(etor, idx, idxs[1].chan, rd->baseColor[1]);
+			sPacket->baseColor[2] = nodalSvc.GetFloat(etor, idx, idxs[2].chan, rd->baseColor[2]);
+		}
+		LXx_VSET3(sParms->diffCol, sPacket->baseColor[0], sPacket->baseColor[1], sPacket->baseColor[2]);
+	}
+
+	/*
+	* Evaluate the color at a spot.
+	*/
+	void UnrealMaterial::cmt_ShaderEvaluate(ILxUnknownID vector, ILxUnknownID rayObj, LXpShadeComponents *sCmp, LXpShadeOutput *sOut, void *data)
+	{
+		LXpUnreal *sPacket = (LXpUnreal*)pkt_service.FastPacket(vector, pkt_offset);
+		RendData *rd = (RendData *)data;
+
+		// Update final output color		
+		for (int i = 0; i < 3; i++)
+			sOut->color[i] = sCmp->diff[i] + sCmp->spec[i] + sCmp->refl[i] + sCmp->tran[i] + sCmp->subs[i] + sCmp->lumi[i];
+	}
+
+	/*
+	* Utility to get the type code for this item type, as needed.
+	*/
+	LXtItemType UnrealMaterial::MyType()
+	{
+		if (my_type != LXiTYPE_NONE)
+			return my_type;
+
+		CLxUser_SceneService	 svc;
+
+		my_type = svc.ItemType(SRVs_UNREAL_MATR_ITEMTYPE);
+		return my_type;
+	}
+
+	LxResult UnrealMaterial::cui_UIHints(const char *channelName, ILxUnknownID hints)
+	{
+		if (!strcmp(channelName, UNREAL_CH_BASECOLOR))
+		{
+			CLxUser_UIHints		 ui(hints);
+			ui.ChannelFlags(LXfUIHINTCHAN_SUGGESTED);
+			return LXe_OK;
+		}
+
+		return LXe_NOTIMPL;
+	}
+
+	/* --------------------------------- */
+
+	/*
+	* Packet Effects definition:
+	* Here we define the texture effects on the Unreal packet
+	*/
+
+	class UnrealPFX : public CLxImpl_PacketEffect
+	{
+	public:
+		UnrealPFX() {}
+
+		static LXtTagInfoDesc	descInfo[];
+
+		LxResult		pfx_Packet(const char **packet) LXx_OVERRIDE;
+		unsigned int		pfx_Count(void) LXx_OVERRIDE;
+		LxResult		pfx_ByIndex(int idx, const char **name, const char **typeName, int	*type) LXx_OVERRIDE;
+		LxResult		pfx_Get(int idx, void *packet, float *val, void *item) LXx_OVERRIDE;
+		LxResult		pfx_Set(int idx, void *packet, const float *val, void *item) LXx_OVERRIDE;
+	};
+
+#define SRVs_UNREAL_PFX			"Unreal"
+#define SRVs_BASECOLOR_TFX		"baseColor"
+
+	LXtTagInfoDesc UnrealPFX::descInfo[] =
+	{
+			{ LXsSRV_USERNAME, "Unreal Packet FX" },
+			{ LXsSRV_LOGSUBSYSTEM, "texture-effect" },
+			{ LXsTFX_CATEGORY, LXsSHADE_SURFACE },
+			{ 0 }
+	};
+
+	LxResult UnrealPFX::pfx_Packet(const char	**packet)
+	{
+		packet[0] = SRVs_UNREAL_VPACKET;
+		return LXe_OK;
+	}
+
+	unsigned int UnrealPFX::pfx_Count(void)
+	{
+		return	9;
+	}
+
+	LxResult UnrealPFX::pfx_ByIndex(int	id, const char **name, const char **typeName, int *type)
+	{
+		switch (id)
+		{
+			case 0:
+				name[0] = SRVs_BASECOLOR_TFX;
+				type[0] = LXi_TFX_COLOR | LXf_TFX_READ | LXf_TFX_WRITE;
+				typeName[0] = LXsTYPE_COLOR1;
+				break;
+		}
+
+		return	LXe_OK;
+	}
+
+	LxResult UnrealPFX::pfx_Get(int  id, void *packet, float *val, void *item)
+	{
+		LXpUnreal	*csp = (LXpUnreal *)packet;
+
+		switch (id)
+		{
+			case 0:
+				val[0] = csp->baseColor[0];
+				val[1] = csp->baseColor[1];
+				val[2] = csp->baseColor[2];
+				break;
+		}
+
+		return LXe_OK;
+	}
+
+	LxResult UnrealPFX::pfx_Set(int  id, void *packet, const float *val, void *item)
+	{
+		LXpUnreal	*csp = (LXpUnreal *)packet;
+
+		switch (id)
+		{
+			case 0:
+				csp->baseColor[0] = val[0];
+				csp->baseColor[1] = val[1];
+				csp->baseColor[2] = val[2];
+				break;
+		}
+
+		return LXe_OK;
+	}
+
+	void initialize()
+	{
+		CLxGenericPolymorph*    srv1 = new CLxPolymorph<UnrealMaterial>;
+		CLxGenericPolymorph*    srv2 = new CLxPolymorph<UnrealPacket>;
+		CLxGenericPolymorph*    srv3 = new CLxPolymorph<UnrealPFX>;
+
+		srv1->AddInterface(new CLxIfc_CustomMaterial<UnrealMaterial>);
+		srv1->AddInterface(new CLxIfc_ChannelUI   <UnrealMaterial>);
+		srv1->AddInterface(new CLxIfc_StaticDesc<UnrealMaterial>);
+		lx::AddServer(SRVs_UNREAL_MATR, srv1);
+
+		srv2->AddInterface(new CLxIfc_VectorPacket<UnrealPacket>);
+		srv2->AddInterface(new CLxIfc_StaticDesc<UnrealPacket>);
+		lx::AddServer(SRVs_UNREAL_VPACKET, srv2);
+
+		srv3->AddInterface(new CLxIfc_PacketEffect<UnrealPFX>);
+		srv3->AddInterface(new CLxIfc_StaticDesc<UnrealPFX>);
+		lx::AddServer(SRVs_UNREAL_PFX, srv3);
+	}
+
+};	// END namespace
+
