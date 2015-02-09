@@ -6,6 +6,7 @@ surface properties are the same as in Unreal and MODO’s preview
 render is a close approximation of the in-game look.
 
 Documentation: http://www.zspline.net/blog/unreal-shader-for-modo/
+
 Discussion forum: https://community.thefoundry.co.uk/discussion/topic.aspx?f=83&t=93635
 
 The "U" logo is used with the permission of Epic Games, Inc. Unreal and its logo are
